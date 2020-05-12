@@ -1,6 +1,19 @@
 import csv
 import locale #currency formatting
 from datetime import datetime
+
+
+class PaymentsAccumulator:
+	#Payments is a list of PaymentReceived objects
+	def __init__(self, payments=[]):
+		self.__payments = payments
+
+	def add(self, morePayments):
+		self.__payments.extend(morePayments)
+
+	def __str__(self):
+		return f'There are {len(self.__payments)} payments in the list'
+
 '''
 This first protoype is built in May 2020
 Note that format of CSV records may change from PayPal, TaskRabbit
@@ -148,6 +161,14 @@ def main():
 	wa_payments = load_wa_payments(wa_csvfilename)
 	for p in wa_payments:
 		print(p)
+
+	#Test the payments accumulator
+	accumulator = PaymentsAccumulator()
+	accumulator.add(tr_payments)
+	accumulator.add(pp_payments)
+	accumulator.add(wa_payments)
+	print(accumulator)
+	print(f'{len(tr_payments)} TR + {len(pp_payments)} PP + {len(wa_payments)} WA')
 
 if __name__ == "__main__":
     main()
