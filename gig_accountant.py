@@ -14,6 +14,10 @@ class PaymentsAccumulator:
 	def __str__(self):
 		return f'There are {len(self.__payments)} payments in the list'
 
+	#Deep copy or shallow copy?
+	def paymentsSortedNewestFirst(self):
+		return sorted(self.__payments, key=lambda p : p.getDate(), reverse=True)
+
 '''
 This first protoype is built in May 2020
 Note that format of CSV records may change from PayPal, TaskRabbit
@@ -34,6 +38,12 @@ class PaymentReceived:
 			str(None) if self.__date is None else self.__date.strftime('%Y-%m-%d'),\
 			str(self.__fromWho),\
 			str(self.__payMethod)])
+
+	def __repr__(self):
+		return f'[{str(self)}]'
+
+	def getDate(self):
+		return self.__date
 
 
 class TaskRabbitPayment(PaymentReceived):
@@ -169,6 +179,7 @@ def main():
 	accumulator.add(wa_payments)
 	print(accumulator)
 	print(f'{len(tr_payments)} TR + {len(pp_payments)} PP + {len(wa_payments)} WA')
+	print(accumulator.paymentsSortedNewestFirst()[:10])
 
 if __name__ == "__main__":
     main()
