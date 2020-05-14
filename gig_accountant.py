@@ -1,10 +1,11 @@
 import csv
 import locale #currency formatting
-from datetime import datetime
+from datetime import datetime, timedelta
+import collections #defaultdict
 
 
 class PaymentsAccumulator:
-	#Payments is a list of PaymentReceived objects
+	#__payments is a list of PaymentReceived objects
 	def __init__(self, payments=[]):
 		self.__payments = payments
 
@@ -15,8 +16,47 @@ class PaymentsAccumulator:
 		return f'There are {len(self.__payments)} payments in the list'
 
 	#Deep copy or shallow copy?
-	def paymentsSortedNewestFirst(self):
+	def paymentsSortedNewestFirst(self): #aka descending date
 		return sorted(self.__payments, key=lambda p : p.getDate(), reverse=True)
+
+	def sortByDate(self): #ascending date
+		self.__payments.sort(key=lambda p : p.getDate())
+
+	#Week is integer 0 - 52
+	#Yr is also integer
+	#6 is for Sunday
+	#Standard Python weekday starts Monday, isocalendar starts Sunday
+	def sundayOfWeekByYear(self, week, yr):
+		return datetime(yr,1,1) + timedelta(weeks=week-1, days=(6-datetime(yr,1,1).weekday()))
+
+	#Assuming a yearly report.
+	#Assume sorted by date or not?
+	def weeklySummary(self):
+		if self.__payments is None:
+			print('No income to report')
+			return
+
+		yr = self.__payments[0].getDate().year		
+		self.sortByDate()
+		weeks = collections.defaultdict(list)
+		for p in self.__payments:
+			#print(p, p.getDate().strftime('%U'))
+			weeks[p.getDate().strftime('%U')].append(p) #%U for week#
+		for week,payments in weeks.items():
+			#Note: week-1 will occasionally (correctly) be the final Sunday of the preceding December
+			thisSunday = self.sundayOfWeekByYear(int(week), yr)#firstDay + timedelta(weeks=int(week)-1, days=(SUNDAY - firstDay.weekday()))
+			toSaturday = thisSunday + timedelta(days=6)
+			print(' Week of', thisSunday.strftime('%A %b %d'),\
+						'-', toSaturday.strftime('%A, %b %d'),':',\
+			 			locale.currency(sum(p.getDollarAmount() for p in payments)))
+			for p in payments:
+				print('\t',p)
+			print()
+
+
+	def grandTotal(self):
+		return locale.currency(\
+			sum(p.getDollarAmount() for p in self.__payments))
 
 '''
 This first protoype is built in May 2020
@@ -24,6 +64,7 @@ Note that format of CSV records may change from PayPal, TaskRabbit
 '''
 class PaymentReceived:
 	#_publicAttr = 'whatever'
+	locale.setlocale( locale.LC_ALL, '' ) #to print dollars format
 
 	#date parameter is datetime object
 	def __init__(self, dollarAmount=0, date=None, fromWho=None, payMethod=None):
@@ -45,13 +86,20 @@ class PaymentReceived:
 	def getDate(self):
 		return self.__date
 
+	def getDollarAmount(self):
+		return self.__dollarAmount
+
+	@classmethod
+	def parseMoney(cls, stringMoney):
+		return float(stringMoney.replace(',','').strip('$'))
+
 
 class TaskRabbitPayment(PaymentReceived):
 	#require types Dict and string?
 	@classmethod
 	def fromDict(cls, fullDict):
 		result = cls(\
-			dollarAmount=float(fullDict['Earnings'].strip('$'))+float(fullDict['Tip'].strip('$')),\
+			dollarAmount=cls.parseMoney(fullDict['Earnings'])+cls.parseMoney(fullDict['Tip']),\
 			date=datetime.strptime(fullDict['Time'], '%Y-%m-%d'),\
 			fromWho=fullDict['Title'],\
 			payMethod='TaskRabbit')
@@ -66,7 +114,8 @@ class PayPalPayment(PaymentReceived):
 		if not cls.isPayment(fullDict):
 			return None
 		result = cls(\
-			dollarAmount=float(fullDict['Amount']),\
+			#.replace() to remove ',' from dollar amount e.g. '-4,000.00'
+			dollarAmount=cls.parseMoney(fullDict['Amount']),\
 			date=datetime.strptime(fullDict['Date'], '%m/%d/%Y'),\
 			fromWho=fullDict['Name'],\
 			payMethod='PayPal')
@@ -78,7 +127,8 @@ class PayPalPayment(PaymentReceived):
 	def isPayment(cls, fullDict):
 		#Note, use == for string comparison. 'is' compares object id (not contents)
 		#Discard all blank Amounts and negatives Amounts
-		if fullDict['Amount'] == '' or float(fullDict['Amount']) <= 0:
+		#.replace() to remove ',' from dollar amount e.g. '-4,000.00'
+		if fullDict['Amount'] == '' or cls.parseMoney(fullDict['Amount']) <= 0:
 			return False
 		#Include only Status = Completed (ignore Pending, Cancelled, Reversed, Paid)
 		#YES Type = General Payment and Status = Completed
@@ -103,14 +153,21 @@ class WyzantPayment(PaymentReceived):
 	@classmethod
 	def fromDict(cls, fullDict):
 		#Filter out Status incomplete? How often does that happen?
-		result = cls(\
-			dollarAmount=float(fullDict['Earned ']),\
-			date=datetime.strptime(fullDict['Date '].split(' ')[0], '%m/%d/%Y'),\
-			fromWho=fullDict['Student '].split(' \n')[0],\
-			payMethod='Wyzant')
-		#TODO use a constant variable for date format '%m/%d/%Y'?
+		result = None
+		if 'ID' in fullDict: #PayOut type CSV sheet
+			result = cls(\
+				dollarAmount=cls.parseMoney(fullDict['Total']),\
+				date=datetime.strptime(fullDict['Date'].split(' ')[0], '%m/%d/%y'),\
+				fromWho='(Direct deposit)',\
+				payMethod='Wyzant')
+		else: #Student-by-student type CSV sheet
+			result = cls(\
+				dollarAmount=cls.parseMoney(fullDict['Earned ']),\
+				date=datetime.strptime(fullDict['Date '].split(' ')[0], '%m/%d/%Y'),\
+				fromWho=fullDict['Student '].split(' \n')[0],\
+				payMethod='Wyzant')
 		result.__fullDict = fullDict
-		return result		
+		return result
 
 
 def load_tr_payments(csvfilename):
@@ -152,7 +209,6 @@ def load_wa_payments(csvfilename):
 	return result
 
 def main():
-	locale.setlocale( locale.LC_ALL, '' ) #to print dollars format
 	
 	#Test TaskRabbit
 	tr_csvfilename = 'C:\\Users\\user\\Desktop\\taskrabbit2019.csv'
@@ -177,9 +233,9 @@ def main():
 	accumulator.add(tr_payments)
 	accumulator.add(pp_payments)
 	accumulator.add(wa_payments)
-	print(accumulator)
+	#print(accumulator)
 	print(f'{len(tr_payments)} TR + {len(pp_payments)} PP + {len(wa_payments)} WA')
 	print(accumulator.paymentsSortedNewestFirst()[:10])
-
+	
 if __name__ == "__main__":
     main()
