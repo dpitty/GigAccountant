@@ -9,45 +9,48 @@ class PaymentsAccumulator:
 	def __init__(self, payments=[]):
 		self.__payments = payments
 
-	def add(self, morePayments):
+	def add(self, morePayments=[]):
 		self.__payments.extend(morePayments)
 
 	def __str__(self):
 		return f'There are {len(self.__payments)} payments in the list'
 
-	#Deep copy or shallow copy?
-	def paymentsSortedNewestFirst(self): #aka descending date
+	def paymentsSortedNewestFirst(self): #descending date
 		return sorted(self.__payments, key=lambda p : p.getDate(), reverse=True)
 
 	def sortByDate(self): #ascending date
 		self.__payments.sort(key=lambda p : p.getDate())
 
-	#Week is integer 0 - 52
-	#Yr is also integer
 	#6 is for Sunday
-	#Standard Python weekday starts Monday, isocalendar starts Sunday
-	def sundayOfWeekByYear(self, week, yr):
+	#Returns datetime 
+	#Note: giving week=-1 (correctly) produces the final Sunday of last year's December
+	def sundayThisWeek(self, week, yr): #int, int
 		return datetime(yr,1,1) + timedelta(weeks=week-1, days=(6-datetime(yr,1,1).weekday()))
 
-	#Assuming a yearly report.
-	#Assume sorted by date or not?
+	#A dictionary, each week (int) maps to a list of Payments for that week
+	#These kind of weeks start on Sunday (see datetime documentation, %U)
+	#We sort-by-date payments for each week while we're at it
+	def __paymentsByWeek(self):
+		paymentsByWeek = collections.defaultdict(list) # weeks[weekNumber] -> list of Payments that week
+		for p in self.__payments:
+			paymentsByWeek[int(p.getDate().strftime('%U'))].append(p) #%U for week# (yields string)
+		for payments in paymentsByWeek.values():
+			payments.sort(key=lambda p : p.getDate())
+		return paymentsByWeek
+
+	#Assuming a yearly report - all Payments from same year
+	#Assuming sorted by date, but not it should work for unsorted anyway.
 	def weeklySummary(self):
 		if self.__payments is None:
 			print('No income to report')
 			return
-
-		yr = self.__payments[0].getDate().year		
-		self.sortByDate()
-		weeks = collections.defaultdict(list)
-		for p in self.__payments:
-			#print(p, p.getDate().strftime('%U'))
-			weeks[p.getDate().strftime('%U')].append(p) #%U for week#
-		for week,payments in weeks.items():
-			#Note: week-1 will occasionally (correctly) be the final Sunday of the preceding December
-			thisSunday = self.sundayOfWeekByYear(int(week), yr)#firstDay + timedelta(weeks=int(week)-1, days=(SUNDAY - firstDay.weekday()))
-			toSaturday = thisSunday + timedelta(days=6)
+		thisYear = self.__payments[0].getDate().year		
+		
+		for week,payments in self.__paymentsByWeek().items():
+			thisSunday = self.sundayThisWeek(week, thisYear)
+			#%A %b %d -> e.g. Sunday May 4
 			print(' Week of', thisSunday.strftime('%A %b %d'),\
-						'-', toSaturday.strftime('%A, %b %d'),':',\
+						'-', (thisSunday + timedelta(days=6)).strftime('%A, %b %d'),':',\
 			 			locale.currency(sum(p.getDollarAmount() for p in payments)))
 			for p in payments:
 				print('\t',p)
@@ -63,7 +66,7 @@ This first protoype is built in May 2020
 Note that format of CSV records may change from PayPal, TaskRabbit
 '''
 class PaymentReceived:
-	#_publicAttr = 'whatever'
+
 	locale.setlocale( locale.LC_ALL, '' ) #to print dollars format
 
 	#date parameter is datetime object
@@ -94,8 +97,9 @@ class PaymentReceived:
 		return float(stringMoney.replace(',','').strip('$'))
 
 
+	#"Virtual"/abstract function for readPaymentsFromCSV?
+
 class TaskRabbitPayment(PaymentReceived):
-	#require types Dict and string?
 	@classmethod
 	def fromDict(cls, fullDict):
 		result = cls(\
@@ -104,6 +108,17 @@ class TaskRabbitPayment(PaymentReceived):
 			fromWho=fullDict['Title'],\
 			payMethod='TaskRabbit')
 		result.__fullDict = fullDict
+		return result
+
+	@classmethod
+	def readPaymentsFromCSV(cls, csvfilename):
+		result = []
+		with open(csvfilename, encoding='utf-8') as csvfile:
+			#discard first three lines of the CSV file (junk)
+			for i in range(3): next(csvfile)
+			csvreader = csv.DictReader(csvfile)
+			for row_as_dict in csvreader:
+				result.append(TaskRabbitPayment.fromDict(row_as_dict))
 		return result
 
 class PayPalPayment(PaymentReceived):
@@ -119,15 +134,12 @@ class PayPalPayment(PaymentReceived):
 			date=datetime.strptime(fullDict['Date'], '%m/%d/%Y'),\
 			fromWho=fullDict['Name'],\
 			payMethod='PayPal')
-		#TODO use a constant variable for date format '%m/%d/%Y'?
 		result.__fullDict = fullDict
 		return result
 
 	@classmethod
 	def isPayment(cls, fullDict):
-		#Note, use == for string comparison. 'is' compares object id (not contents)
 		#Discard all blank Amounts and negatives Amounts
-		#.replace() to remove ',' from dollar amount e.g. '-4,000.00'
 		if fullDict['Amount'] == '' or cls.parseMoney(fullDict['Amount']) <= 0:
 			return False
 		#Include only Status = Completed (ignore Pending, Cancelled, Reversed, Paid)
@@ -144,23 +156,38 @@ class PayPalPayment(PaymentReceived):
 		#E.g.: Status = Paid and Type = Invoice Sent does not describe a payment...
 		return False
 
+	@classmethod
+	def readPaymentsFromCSV(cls, csvfilename):
+		result = []
+		num_non_payment_rows = 0 #Handy for sanity check
+		#Need utf-8-sig to handle non-English symbols as well as "BOM" #\ufeff
+		#https://stackoverflow.com/questions/17912307/u-ufeff-in-python-string
+		with open(csvfilename, encoding='utf-8-sig') as csvfile:
+			csvreader = csv.DictReader(csvfile)
+			for row_as_dict in csvreader:
+				p = PayPalPayment.fromDict(row_as_dict)
+				if p:
+					result.append(p)
+				else:
+					num_non_payment_rows += 1
+		return result
+
 
 class WyzantPayment(PaymentReceived):
-	#Note. No easy way to get a spreadsheet of payments... but maybe straight from HTML?
-	#Maybe a script that fills the form specifying dates and retrieves the data?
-	#I'm copy-pasting into a spreadsheet. It introducs all sorts of irregularities
-	#Like a ' ' at the end of column titles
+	#TODO. No easy way to get a spreadsheet of payments... so maybe straight from HTML?
+	#Maybe a script that fills the forms then retrieves the data?
+	#I'm copy-pasting into a spreadsheet. It give quirks like ' ' at end of column titles
 	@classmethod
 	def fromDict(cls, fullDict):
 		#Filter out Status incomplete? How often does that happen?
 		result = None
-		if 'ID' in fullDict: #PayOut type CSV sheet
+		if 'ID' in fullDict: #"PayOut type" CSV records
 			result = cls(\
 				dollarAmount=cls.parseMoney(fullDict['Total']),\
 				date=datetime.strptime(fullDict['Date'].split(' ')[0], '%m/%d/%y'),\
 				fromWho='(Direct deposit)',\
 				payMethod='Wyzant')
-		else: #Student-by-student type CSV sheet
+		else: #"Student-by-student type" CSV records
 			result = cls(\
 				dollarAmount=cls.parseMoney(fullDict['Earned ']),\
 				date=datetime.strptime(fullDict['Date '].split(' ')[0], '%m/%d/%Y'),\
@@ -169,70 +196,41 @@ class WyzantPayment(PaymentReceived):
 		result.__fullDict = fullDict
 		return result
 
+	@classmethod
+	def readPaymentsFromCSV(cls, csvfilename):
+		result = []
+		with open(csvfilename, encoding='utf-8') as csvfile:
+			csvreader = csv.DictReader(csvfile)
+			for row_as_dict in csvreader:
+				result.append(WyzantPayment.fromDict(row_as_dict))
+			return result
 
-def load_tr_payments(csvfilename):
-	result = []
-	with open(csvfilename, encoding='utf-8') as csvfile:
-		#discard first three lines
-		next(csvfile)
-		next(csvfile)
-		next(csvfile)
-		csvreader = csv.DictReader(csvfile)
-		for row_as_dict in csvreader: #row is a dict
-			#print(row_as_dict)
-			result.append(TaskRabbitPayment.fromDict(row_as_dict))
-	return result
 
-def load_pp_payments(csvfilename):
-	result = []
-	num_non_payment_rows = 0
-	#Need utf-8-sig to handle non-English symbols as well as BOM
-	#\ufeff
-	#https://stackoverflow.com/questions/17912307/u-ufeff-in-python-string
-	with open(csvfilename, encoding='utf-8-sig') as csvfile:
-		csvreader = csv.DictReader(csvfile)
-		for row_as_dict in csvreader:
-			p = PayPalPayment.fromDict(row_as_dict)
-			if p:
-				result.append(p)
-			else:
-				num_non_payment_rows += 1
-	print("Found",num_non_payment_rows,"Non-payment rows in",csvfilename)
-	return result
 
-def load_wa_payments(csvfilename):
-	result = []
-	with open(csvfilename, encoding='utf-8') as csvfile:
-		csvreader = csv.DictReader(csvfile)
-		for row_as_dict in csvreader:
-			result.append(WyzantPayment.fromDict(row_as_dict))
-	return result
 
 def main():
 	
 	#Test TaskRabbit
 	tr_csvfilename = 'C:\\Users\\user\\Desktop\\taskrabbit2019.csv'
-	tr_payments = load_tr_payments(tr_csvfilename) #list of PaymentReceived objects
+	tr_payments = TaskRabbitPayment.readPaymentsFromCSV(tr_csvfilename) #list of PaymentReceived objects
 	for p in tr_payments:
 		print(p)
 
 	#Test PayPal
 	pp_csvfilename = 'C:\\Users\\user\\Desktop\\PayPal2019.csv'
-	pp_payments = load_pp_payments(pp_csvfilename)
+	pp_payments = PayPalPayment.readPaymentsFromCSV(pp_csvfilename)
 	for p in pp_payments:
 		print(p)
 
 	#Test Wzyant
 	wa_csvfilename = 'C:\\Users\\user\\Desktop\\wyzant2019detail.csv'
-	wa_payments = load_wa_payments(wa_csvfilename)
+	wa_payments = WyzantPayment.readPaymentsFromCSV(wa_csvfilename)
 	for p in wa_payments:
 		print(p)
 
 	#Test the payments accumulator
 	accumulator = PaymentsAccumulator()
-	accumulator.add(tr_payments)
-	accumulator.add(pp_payments)
-	accumulator.add(wa_payments)
+	accumulator.add(tr_payments + pp_payments + wa_payments)
 	#print(accumulator)
 	print(f'{len(tr_payments)} TR + {len(pp_payments)} PP + {len(wa_payments)} WA')
 	print(accumulator.paymentsSortedNewestFirst()[:10])
